@@ -90,7 +90,9 @@ class PlaybackStream:
         sample_rate = self.sample_rate
 
         # pre-load so there is always at least 1 buffer of extra data queued
-        self.out_stream.write(b'\0\0' * 512)
+        self.play_start_time = time.time()
+        pre_buffer = 512
+        self.out_stream.write(b'\0\0' * pre_buffer)
 
         while self.running:
             read_pointer = self.play_head.pointer
@@ -107,7 +109,7 @@ class PlaybackStream:
             self.out_stream.write(buf.tobytes())
             ring_buffer[ring_ptr:ring_ptr+frames_per_buffer] = 0
             read_pointer += len(buf)
-            self.play_head = PlayHead(read_pointer, now)
+            self.play_head = PlayHead(read_pointer, self.play_start_time + (read_pointer + pre_buffer) / sample_rate)
 
     def stop(self):
         self.running = False
@@ -150,7 +152,7 @@ class StreamWriter:
         else:
             self.thread = None
 
-        self.index_offset:int = 0
+        self.index_offset:Optional[int] = None
 
         in_stream.connect(self)
 
@@ -163,19 +165,19 @@ class StreamWriter:
             self.data_queue.put(data)
 
     def handle_data(self, data:AudioChunk):
-        # print("Handle data")
         sample_rate = self.out_stream.sample_rate
         buf, index, play_time = data
-        # print("   data:", index, play_time)
 
-        last_play_index, last_play_time = self.out_stream.play_head
-        # print("   play head:", last_play_index, last_play_time)
-        desired_play_time = play_time + self.latency
-        desired_play_index = last_play_index + int((desired_play_time - last_play_time) * sample_rate)
-        # print("   desired play:", desired_play_index, desired_play_time)
-        desired_index_offset = desired_play_index - index
-        # print("   desired offset:", desired_index_offset)
-        if abs(self.index_offset - desired_index_offset) > (10e-3 * sample_rate):
+        if self.index_offset is None:
+            last_play_index, last_play_time = self.out_stream.play_head
+            desired_play_time = play_time + self.latency
+            desired_play_index = last_play_index + int((desired_play_time - last_play_time) * sample_rate)
+            desired_index_offset = desired_play_index - index
+            # print("Handle data")
+            # print("   data:", index, play_time)
+            # print("   play head:", last_play_index, last_play_time)
+            # print("   desired play:", desired_play_index, desired_play_time)
+            # print("   desired offset:", desired_index_offset)
             # print("adjust index offset:", self.index_offset, desired_index_offset)
             self.index_offset = desired_index_offset
 
@@ -183,6 +185,10 @@ class StreamWriter:
         # print("   write:", write_pointer, self.index_offset)
 
         self.out_stream.add_buffer_data(buf, write_pointer)
+
+    def set_latency(self, latency:float):
+        self.latency = latency
+        self.index_offset = None
 
     def stop(self):
         self.running = False
@@ -256,6 +262,11 @@ class UDPStream(InputStream):
         self.clock_offset = ((0.5 * (timing[:,2] + timing[:,0])) - timing[:,1]).mean()
         print("Clock offset:", self.clock_offset)
 
+        # make sure the remote end gets the clock offset update
+        msg = b'c' + struct.pack('d', -self.clock_offset)
+        for i in range(5):
+            self.send_socket.sendto(msg, self.remote_address)
+
     def recv_loop(self):
         sock = self.recv_socket
         while self.running:
@@ -274,6 +285,10 @@ class UDPStream(InputStream):
                     # ping
                     msg = b'r' + struct.pack('d', time.time())
                     self.send_socket.sendto(msg, self.remote_address)
+                elif msg_type == 'c':
+                    # set clock offset
+                    self.clock_offset = struct.unpack('d', data[1:9])[0]
+                    print("updated clock offset: ", self.clock_offset)
                 else:
                     print(data)
                     raise ValueError("Unrecognized message type: %r" % msg_type)
