@@ -1,5 +1,5 @@
-import sys, threading, atexit, queue, socket, time, argparse
-from typing import Optional, NamedTuple
+import sys, threading, atexit, queue, socket, time, argparse, struct
+from typing import Optional, NamedTuple, Tuple
 import numpy as np
 import pyaudio
 
@@ -10,8 +10,26 @@ class AudioChunk(NamedTuple):
     timestamp: float
 
 
-class RecordingStream:
+class InputStream:
+    def __init__(self):
+        self.connections = []
+
+    def connect(self, target):
+        """Add new frame callback
+        """
+        self.connections.append(target)
+
+    def send(self, data):
+        for target in self.connections:
+            target.add_buffer(data)
+
+
+class RecordingStream(InputStream):
     def __init__(self, sample_rate, frames_per_buffer):
+        InputStream.__init__(self)
+
+        self.pointer = 0
+
         self.in_stream = pa.open(
             format=pyaudio.paInt16,
             channels=1,
@@ -21,24 +39,15 @@ class RecordingStream:
             frames_per_buffer=frames_per_buffer,
         )
 
-        self.connections = []
-        self.pointer = 0
-
-    def connect(self, target):
-        """Add new frame callback
-        """
-        self.connections.append(target)
-
     def stop(self):
         self.in_stream.stop_stream()
         self.in_stream.close()
 
     def new_frame(self, data, n_frames, time_info, status):
-        arr = np.fromstring(data, dtype='int16')
+        arr = np.frombuffer(data, dtype='int16')
 
         d = AudioChunk(arr, self.pointer, time.time())
-        for target in self.connections:
-            target.add_buffer(d)
+        self.send(d)
         
         self.pointer += len(arr)
         return None, pyaudio.paContinue
@@ -95,7 +104,7 @@ class PlaybackStream:
                 time.sleep(dt)
             
             buf:np.ndarray = ring_buffer[ring_ptr:ring_ptr+frames_per_buffer]
-            self.out_stream.write(buf.tostring())
+            self.out_stream.write(buf.tobytes())
             ring_buffer[ring_ptr:ring_ptr+frames_per_buffer] = 0
             read_pointer += len(buf)
             self.play_head = PlayHead(read_pointer, now)
@@ -128,7 +137,7 @@ class StreamWriter:
     thread: Optional[threading.Thread]
     data_queue: queue.PriorityQueue
 
-    def __init__(self, in_stream:RecordingStream, out_stream:PlaybackStream, latency:float=100e-3, thread:bool=False):
+    def __init__(self, in_stream:InputStream, out_stream:PlaybackStream, latency:float=100e-3, thread:bool=False):
         self.in_stream = in_stream
         self.out_stream = out_stream
         self.latency = latency
@@ -180,12 +189,113 @@ class StreamWriter:
             self.handle_data(data)
 
 
+class UDPStream(InputStream):
+    remote_address: Optional[Tuple[str,int]]
+    local_address: Tuple[str,int]
+
+    @staticmethod
+    def parse_address(addr:str) -> Tuple[str,int]:
+        parts = addr.split(':')
+        if len(parts) == 1:
+            parts.append('31415')
+        return (parts[0], int(parts[1]))
+
+    def __init__(self, remote_address:Optional[str], local_address='0.0.0.0:31415'):
+        InputStream.__init__(self)
+
+        self.local_address = self.parse_address(local_address)
+        self.running = True
+
+        self.clock_offset = None
+
+        self.recv_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.recv_socket.bind(self.local_address)
+        self.recv_socket.settimeout(1)
+
+        self.send_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+        if remote_address is None:
+            self.remote_address = None
+        else:
+            self.remote_address = self.parse_address(remote_address)
+            self.measure_lag()
+
+        self.recv_thread = threading.Thread(target=self.recv_loop, daemon=True)
+        self.recv_thread.start()
+
+    def measure_lag(self):
+        assert self.remote_address is not None
+        timing = []
+        msg = b'p' + struct.pack('d', time.time())
+        for i in range(100):
+            now = time.time()
+            self.send_socket.sendto(msg, self.remote_address)
+            while True:
+                try:
+                    data, address = self.recv_socket.recvfrom(9)
+                    if data[0:1] != b'r':
+                        continue
+                    after = time.time()
+                    assert address[0] == self.remote_address[0]
+                    then = struct.unpack('d', data[1:9])[0]
+                    timing.append([now, then, after])
+                    break
+                except socket.timeout:
+                    break
+
+        timing = np.array(timing)
+        avg_roundtrip = (timing[:,2] - timing[:,0]).mean()
+        print("Received %d/100 poing replies; avg roundtrip = %0.2f ms" % (len(timing), avg_roundtrip * 1000))
+
+        self.clock_offset = ((0.5 * (timing[:,2] + timing[:,0])) - timing[:,1]).mean()
+
+    def recv_loop(self):
+        sock = self.recv_socket
+        while self.running:
+            try:
+                data, address = sock.recvfrom(50000)
+                if self.remote_address is None:
+                    self.remote_address = (address[0], 31415)
+                msg_type = chr(data[0])
+                if msg_type == 'a':
+                    index, timestamp = struct.unpack('id', data[1:17])
+                    # audio data follows header
+                    buf = np.frombuffer(data[17:], dtype='int16')
+                    # send received data to other (local) listeners
+                    self.send(AudioChunk(buf, index, timestamp))
+                elif msg_type == 'p':
+                    # ping
+                    msg = b'r' + struct.pack('d', time.time())
+                    self.send_socket.sendto(msg, self.remote_address)
+                else:
+                    print(data)
+                    raise ValueError("Unrecognized message type: %r" % msg_type)
+
+            except socket.timeout:
+                continue
+
+    def stop(self):
+        self.running = False
+        self.recv_thread.join()
+        self.recv_socket.close()
+        if self.send_socket is not None:
+            self.send_socket.close()
+
+    def add_buffer(self, data:AudioChunk):
+        """Send the audio chunk to the remote host(s)
+        """
+        if self.remote_address is None:
+            return
+        msg = b'a' + struct.pack('id', data.pointer, data.timestamp) + data.data.tobytes()
+        self.send_socket.sendto(msg, self.remote_address)
+
+
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
-    #parser.add_argument('address', type=str, help='IP address to connect to')
+    parser.add_argument('address', type=str, nargs='?', default=None, help='IP address:port to send data to')
+    parser.add_argument('--listen', type=str, default='0.0.0.0:31415', help='IP address:port to listen for incoming data')
     args = parser.parse_args()
-
 
     pa = pyaudio.PyAudio()
 
@@ -194,6 +304,10 @@ if __name__ == '__main__':
     mic_stream = RecordingStream(sample_rate, frames_per_buffer=128)
     out_stream = PlaybackStream(sample_rate, frames_per_buffer=128)
     mic_writer = StreamWriter(mic_stream, out_stream, latency=20e-3)
+
+    udp_stream = UDPStream(args.address, args.listen)
+    mic_stream.connect(udp_stream)
+    udp_writer = StreamWriter(udp_stream, out_stream, latency=20e-3)
 
     def quit():
         out_stream.stop()
