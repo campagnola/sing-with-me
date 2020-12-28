@@ -163,18 +163,24 @@ class StreamWriter:
             self.data_queue.put(data)
 
     def handle_data(self, data:AudioChunk):
+        # print("Handle data")
         sample_rate = self.out_stream.sample_rate
         buf, index, play_time = data
+        # print("   data:", index, play_time)
 
         last_play_index, last_play_time = self.out_stream.play_head
+        # print("   play head:", last_play_index, last_play_time)
         desired_play_time = play_time + self.latency
         desired_play_index = last_play_index + int((desired_play_time - last_play_time) * sample_rate)
-        desired_index_offset = desired_play_index - last_play_index
-        if abs(self.index_offset - desired_index_offset) > (20e-3 * sample_rate):
-            print("adjust index offset:", self.index_offset, desired_index_offset)
+        # print("   desired play:", desired_play_index, desired_play_time)
+        desired_index_offset = desired_play_index - index
+        # print("   desired offset:", desired_index_offset)
+        if abs(self.index_offset - desired_index_offset) > (10e-3 * sample_rate):
+            # print("adjust index offset:", self.index_offset, desired_index_offset)
             self.index_offset = desired_index_offset
 
         write_pointer = index + self.index_offset
+        # print("   write:", write_pointer, self.index_offset)
 
         self.out_stream.add_buffer_data(buf, write_pointer)
 
@@ -206,7 +212,7 @@ class UDPStream(InputStream):
         self.local_address = self.parse_address(local_address)
         self.running = True
 
-        self.clock_offset = None
+        self.clock_offset = 0
 
         self.recv_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.recv_socket.bind(self.local_address)
@@ -248,6 +254,7 @@ class UDPStream(InputStream):
         print("Received %d/100 poing replies; avg roundtrip = %0.2f ms" % (len(timing), avg_roundtrip * 1000))
 
         self.clock_offset = ((0.5 * (timing[:,2] + timing[:,0])) - timing[:,1]).mean()
+        print("Clock offset:", self.clock_offset)
 
     def recv_loop(self):
         sock = self.recv_socket
@@ -258,11 +265,11 @@ class UDPStream(InputStream):
                     self.remote_address = (address[0], 31415)
                 msg_type = chr(data[0])
                 if msg_type == 'a':
-                    index, timestamp = struct.unpack('id', data[1:17])
+                    index, timestamp = struct.unpack('Qd', data[1:17])
                     # audio data follows header
                     buf = np.frombuffer(data[17:], dtype='int16')
                     # send received data to other (local) listeners
-                    self.send(AudioChunk(buf, index, timestamp))
+                    self.send(AudioChunk(buf, index, timestamp + self.clock_offset))
                 elif msg_type == 'p':
                     # ping
                     msg = b'r' + struct.pack('d', time.time())
@@ -300,14 +307,15 @@ if __name__ == '__main__':
     pa = pyaudio.PyAudio()
 
     sample_rate = 22050
+    latency = 50e-3
 
     mic_stream = RecordingStream(sample_rate, frames_per_buffer=128)
     out_stream = PlaybackStream(sample_rate, frames_per_buffer=128)
-    mic_writer = StreamWriter(mic_stream, out_stream, latency=20e-3)
+    mic_writer = StreamWriter(mic_stream, out_stream, latency=latency)
 
     udp_stream = UDPStream(args.address, args.listen)
     mic_stream.connect(udp_stream)
-    udp_writer = StreamWriter(udp_stream, out_stream, latency=20e-3)
+    udp_writer = StreamWriter(udp_stream, out_stream, latency=latency)
 
     def quit():
         out_stream.stop()
