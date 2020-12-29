@@ -44,7 +44,7 @@ class RecordingStream(InputStream):
         self.in_stream.close()
 
     def new_frame(self, data, n_frames, time_info, status):
-        arr = np.frombuffer(data, dtype='int16')
+        arr = np.frombuffer(data, dtype="int16")
 
         d = AudioChunk(arr, self.pointer, time.time())
         self.send(d)
@@ -67,7 +67,7 @@ class PlaybackStream:
         self.frames_per_buffer = frames_per_buffer
         self.buffer_duration = frames_per_buffer / sample_rate
 
-        self.rim_buffer = np.zeros(frames_per_buffer * int(10.0 / self.buffer_duration), dtype='int16')
+        self.rim_buffer = np.zeros(frames_per_buffer * int(10.0 / self.buffer_duration), dtype="int16")
         self.play_head = PlayHead(0, 0)
 
         self.running = True
@@ -79,7 +79,7 @@ class PlaybackStream:
             rate=sample_rate,
             frames_per_buffer=frames_per_buffer,
             output=True,
-            stream_callback=self.on_stream_ready
+            stream_callback=self.on_stream_ready,
         )
         # self.out_stream.start_stream()
 
@@ -96,10 +96,10 @@ class PlaybackStream:
         read_pointer = self.play_head.pointer
         rim_ptr = read_pointer % len(rim_buffer)
 
-        buf: np.ndarray = rim_buffer[rim_ptr:rim_ptr + frames_per_buffer]
+        buf: np.ndarray = rim_buffer[rim_ptr : rim_ptr + frames_per_buffer]
         out_data = buf.tobytes()
         flag = pyaudio.paContinue
-        rim_buffer[rim_ptr:rim_ptr + frames_per_buffer] = 0
+        rim_buffer[rim_ptr : rim_ptr + frames_per_buffer] = 0
         read_pointer += len(buf)
         self.play_head = PlayHead(read_pointer, self.start_time + read_pointer / sample_rate)
         return (out_data, flag)
@@ -113,7 +113,7 @@ class PlaybackStream:
         # pre-load so there is always at least 1 buffer of extra data queued
         self.play_start_time = time.time()
         pre_buffer = 1024 * 4
-        self.out_stream.write(b'\0\0' * pre_buffer)
+        self.out_stream.write(b"\0\0" * pre_buffer)
 
         while self.running:
             read_pointer = self.play_head.pointer
@@ -126,11 +126,11 @@ class PlaybackStream:
             if dt > 0:
                 time.sleep(dt)
 
-            buf: np.ndarray = rim_buffer[rim_ptr:rim_ptr + frames_per_buffer]
+            buf: np.ndarray = rim_buffer[rim_ptr : rim_ptr + frames_per_buffer]
             before = time.time()
             self.out_stream.write(buf.tobytes())
             print(f"time to write {time.time() - before:0.05f}")
-            rim_buffer[rim_ptr:rim_ptr + frames_per_buffer] = 0
+            rim_buffer[rim_ptr : rim_ptr + frames_per_buffer] = 0
             read_pointer += len(buf)
             self.play_head = PlayHead(read_pointer, self.play_start_time + (read_pointer + pre_buffer) / sample_rate)
 
@@ -149,7 +149,7 @@ class PlaybackStream:
         rim_ptr = index % len(rim_buffer)
 
         first_size = min(len(data), len(rim_buffer) - rim_ptr)
-        rim_buffer[rim_ptr:rim_ptr + first_size] += data[:first_size]
+        rim_buffer[rim_ptr : rim_ptr + first_size] += data[:first_size]
         if first_size < len(data):
             second_size = len(data) - first_size
             rim_buffer[:second_size] = data[first_size:]
@@ -158,10 +158,13 @@ class PlaybackStream:
 class StreamWriter:
     """Receive timestamped sound chunks, write into an output stream with a target latency
     """
+
     thread: Optional[threading.Thread]
     data_queue: queue.PriorityQueue
 
-    def __init__(self, in_stream:InputStream, out_stream:PlaybackStream, latency:float=100e-3, thread:bool=False):
+    def __init__(
+        self, in_stream: InputStream, out_stream: PlaybackStream, latency: float = 100e-3, thread: bool = False
+    ):
         self.in_stream = in_stream
         self.out_stream = out_stream
         self.latency = latency
@@ -229,12 +232,12 @@ class UDPStream(InputStream):
 
     @staticmethod
     def parse_address(addr: str) -> Tuple[str, int]:
-        parts = addr.split(':')
+        parts = addr.split(":")
         if len(parts) == 1:
-            parts.append('31415')
+            parts.append("31415")
         return (parts[0], int(parts[1]))
 
-    def __init__(self, remote_address: Optional[str], local_address='0.0.0.0:31415'):
+    def __init__(self, remote_address: Optional[str], local_address="0.0.0.0:31415"):
         InputStream.__init__(self)
 
         self.local_address = self.parse_address(local_address)
@@ -260,18 +263,18 @@ class UDPStream(InputStream):
     def measure_lag(self):
         assert self.remote_address is not None
         timing = []
-        msg = b'p' + struct.pack('d', time.time())
+        msg = b"p" + struct.pack("d", time.time())
         for i in range(100):
             now = time.time()
             self.send_socket.sendto(msg, self.remote_address)
             while True:
                 try:
                     data, address = self.recv_socket.recvfrom(9)
-                    if data[0:1] != b'r':
+                    if data[0:1] != b"r":
                         continue
                     after = time.time()
                     assert address[0] == self.remote_address[0]
-                    then = struct.unpack('d', data[1:9])[0]
+                    then = struct.unpack("d", data[1:9])[0]
                     timing.append([now, then, after])
                     break
                 except socket.timeout:
@@ -285,7 +288,7 @@ class UDPStream(InputStream):
         print("Clock offset:", self.clock_offset)
 
         # make sure the remote end gets the clock offset update
-        msg = b'c' + struct.pack('d', -self.clock_offset)
+        msg = b"c" + struct.pack("d", -self.clock_offset)
         for i in range(5):
             self.send_socket.sendto(msg, self.remote_address)
 
@@ -297,19 +300,19 @@ class UDPStream(InputStream):
                 if self.remote_address is None:
                     self.remote_address = (address[0], 31415)
                 msg_type = chr(data[0])
-                if msg_type == 'a':
-                    index, timestamp = struct.unpack('Qd', data[1:17])
+                if msg_type == "a":
+                    index, timestamp = struct.unpack("Qd", data[1:17])
                     # audio data follows header
-                    buf = np.frombuffer(data[17:], dtype='int16')
+                    buf = np.frombuffer(data[17:], dtype="int16")
                     # send received data to other (local) listeners
                     self.send(AudioChunk(buf, index, timestamp + self.clock_offset))
-                elif msg_type == 'p':
+                elif msg_type == "p":
                     # ping
-                    msg = b'r' + struct.pack('d', time.time())
+                    msg = b"r" + struct.pack("d", time.time())
                     self.send_socket.sendto(msg, self.remote_address)
-                elif msg_type == 'c':
+                elif msg_type == "c":
                     # set clock offset
-                    self.clock_offset = struct.unpack('d', data[1:9])[0]
+                    self.clock_offset = struct.unpack("d", data[1:9])[0]
                     print("updated clock offset: ", self.clock_offset)
                 else:
                     print(data)
@@ -330,14 +333,16 @@ class UDPStream(InputStream):
         """
         if self.remote_address is None:
             return
-        msg = b'a' + struct.pack('id', data.pointer, data.timestamp) + data.data.tobytes()
+        msg = b"a" + struct.pack("id", data.pointer, data.timestamp) + data.data.tobytes()
         self.send_socket.sendto(msg, self.remote_address)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('address', type=str, nargs='?', default=None, help='IP address:port to send data to')
-    parser.add_argument('--listen', type=str, default='0.0.0.0:31415', help='IP address:port to listen for incoming data')
+    parser.add_argument("address", type=str, nargs="?", default=None, help="IP address:port to send data to")
+    parser.add_argument(
+        "--listen", type=str, default="0.0.0.0:31415", help="IP address:port to listen for incoming data"
+    )
     args = parser.parse_args()
 
     pa = pyaudio.PyAudio()
@@ -353,11 +358,9 @@ if __name__ == '__main__':
     mic_stream.connect(udp_stream)
     udp_writer = StreamWriter(udp_stream, out_stream, latency=latency)
 
-
     def quit():
         out_stream.stop()
         mic_stream.stop()
         pa.terminate()
-
 
     atexit.register(quit)
