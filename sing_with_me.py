@@ -48,7 +48,7 @@ class RecordingStream(InputStream):
 
         d = AudioChunk(arr, self.pointer, time.time())
         self.send(d)
-        
+
         self.pointer += len(arr)
         return None, pyaudio.paContinue
 
@@ -62,7 +62,7 @@ class PlaybackStream:
     rim_buffer: np.ndarray
     play_head: PlayHead
 
-    def __init__(self, sample_rate:float, frames_per_buffer:int):
+    def __init__(self, sample_rate: float, frames_per_buffer: int):
         self.sample_rate = sample_rate
         self.frames_per_buffer = frames_per_buffer
         self.buffer_duration = frames_per_buffer / sample_rate
@@ -125,12 +125,12 @@ class PlaybackStream:
             dt = (next_play_time - now) - 2e-3
             if dt > 0:
                 time.sleep(dt)
-            
-            buf:np.ndarray = rim_buffer[rim_ptr:rim_ptr+frames_per_buffer]
+
+            buf: np.ndarray = rim_buffer[rim_ptr:rim_ptr + frames_per_buffer]
             before = time.time()
             self.out_stream.write(buf.tobytes())
             print(f"time to write {time.time() - before:0.05f}")
-            rim_buffer[rim_ptr:rim_ptr+frames_per_buffer] = 0
+            rim_buffer[rim_ptr:rim_ptr + frames_per_buffer] = 0
             read_pointer += len(buf)
             self.play_head = PlayHead(read_pointer, self.play_start_time + (read_pointer + pre_buffer) / sample_rate)
 
@@ -139,17 +139,17 @@ class PlaybackStream:
         self.out_stream.stop_stream()
         self.out_stream.close()
 
-    def index_at_time(self, time:float):
+    def index_at_time(self, time: float):
         return int((time - self.start_time) * sample_rate)
 
-    def add_buffer_data(self, data:np.ndarray, index:int):
+    def add_buffer_data(self, data: np.ndarray, index: int):
         """add data into rim buffer, possibly in two parts if it wraps around to the beginning
         """
         rim_buffer = self.rim_buffer
         rim_ptr = index % len(rim_buffer)
 
         first_size = min(len(data), len(rim_buffer) - rim_ptr)
-        rim_buffer[rim_ptr:rim_ptr+first_size] += data[:first_size]
+        rim_buffer[rim_ptr:rim_ptr + first_size] += data[:first_size]
         if first_size < len(data):
             second_size = len(data) - first_size
             rim_buffer[:second_size] = data[first_size:]
@@ -174,11 +174,11 @@ class StreamWriter:
         else:
             self.thread = None
 
-        self.index_offset:Optional[int] = None
+        self.index_offset: Optional[int] = None
 
         in_stream.connect(self)
 
-    def add_buffer(self, data:AudioChunk):
+    def add_buffer(self, data: AudioChunk):
         if not self.running:
             return
         if self.thread is None:
@@ -186,7 +186,7 @@ class StreamWriter:
         else:
             self.data_queue.put(data)
 
-    def handle_data(self, data:AudioChunk):
+    def handle_data(self, data: AudioChunk):
         sample_rate = self.out_stream.sample_rate
         buf, index, play_time = data
 
@@ -208,7 +208,7 @@ class StreamWriter:
 
         self.out_stream.add_buffer_data(buf, write_pointer)
 
-    def set_latency(self, latency:float):
+    def set_latency(self, latency: float):
         self.latency = latency
         self.index_offset = None
 
@@ -224,17 +224,17 @@ class StreamWriter:
 
 
 class UDPStream(InputStream):
-    remote_address: Optional[Tuple[str,int]]
-    local_address: Tuple[str,int]
+    remote_address: Optional[Tuple[str, int]]
+    local_address: Tuple[str, int]
 
     @staticmethod
-    def parse_address(addr:str) -> Tuple[str,int]:
+    def parse_address(addr: str) -> Tuple[str, int]:
         parts = addr.split(':')
         if len(parts) == 1:
             parts.append('31415')
         return (parts[0], int(parts[1]))
 
-    def __init__(self, remote_address:Optional[str], local_address='0.0.0.0:31415'):
+    def __init__(self, remote_address: Optional[str], local_address='0.0.0.0:31415'):
         InputStream.__init__(self)
 
         self.local_address = self.parse_address(local_address)
@@ -278,10 +278,10 @@ class UDPStream(InputStream):
                     break
 
         timing = np.array(timing)
-        avg_roundtrip = (timing[:,2] - timing[:,0]).mean()
+        avg_roundtrip = (timing[:, 2] - timing[:, 0]).mean()
         print("Received %d/100 poing replies; avg roundtrip = %0.2f ms" % (len(timing), avg_roundtrip * 1000))
 
-        self.clock_offset = ((0.5 * (timing[:,2] + timing[:,0])) - timing[:,1]).mean()
+        self.clock_offset = ((0.5 * (timing[:, 2] + timing[:, 0])) - timing[:, 1]).mean()
         print("Clock offset:", self.clock_offset)
 
         # make sure the remote end gets the clock offset update
@@ -325,7 +325,7 @@ class UDPStream(InputStream):
         if self.send_socket is not None:
             self.send_socket.close()
 
-    def add_buffer(self, data:AudioChunk):
+    def add_buffer(self, data: AudioChunk):
         """Send the audio chunk to the remote host(s)
         """
         if self.remote_address is None:
@@ -335,7 +335,6 @@ class UDPStream(InputStream):
 
 
 if __name__ == '__main__':
-
     parser = argparse.ArgumentParser()
     parser.add_argument('address', type=str, nargs='?', default=None, help='IP address:port to send data to')
     parser.add_argument('--listen', type=str, default='0.0.0.0:31415', help='IP address:port to listen for incoming data')
@@ -354,9 +353,11 @@ if __name__ == '__main__':
     mic_stream.connect(udp_stream)
     udp_writer = StreamWriter(udp_stream, out_stream, latency=latency)
 
+
     def quit():
         out_stream.stop()
         mic_stream.stop()
         pa.terminate()
+
 
     atexit.register(quit)
