@@ -59,44 +59,65 @@ class PlayHead(NamedTuple):
 
 
 class PlaybackStream:
-    ring_buffer: np.ndarray
+    rim_buffer: np.ndarray
     play_head: PlayHead
 
     def __init__(self, sample_rate:float, frames_per_buffer:int):
+        self.sample_rate = sample_rate
+        self.frames_per_buffer = frames_per_buffer
+        self.buffer_duration = frames_per_buffer / sample_rate
+
+        self.rim_buffer = np.zeros(frames_per_buffer * int(10.0 / self.buffer_duration), dtype='int16')
+        self.play_head = PlayHead(0, 0)
+
+        self.running = True
+        self.start_time = time.time()
+
         self.out_stream = pa.open(
             format=pyaudio.paInt16,
             channels=1,
             rate=sample_rate,
             frames_per_buffer=frames_per_buffer,
             output=True,
+            stream_callback=self.on_stream_ready
         )
+        # self.out_stream.start_stream()
 
-        self.sample_rate = sample_rate
-        self.frames_per_buffer = frames_per_buffer
-        self.buffer_duration = frames_per_buffer / sample_rate
+        # self.thread = threading.Thread(target=self.run, daemon=True)
+        # self.thread.start()
 
-        self.ring_buffer = np.zeros(frames_per_buffer * int(10.0 / self.buffer_duration), dtype='int16')
-        self.play_head = PlayHead(0, 0)
+    def on_stream_ready(self, in_data, frame_count, time_info, status_flags):
+        # output length must be: frame_count * channels * bytes - per - channel
+        # retval should be (out_data, flags)
+        rim_buffer = self.rim_buffer
+        frames_per_buffer = self.frames_per_buffer
+        sample_rate = self.sample_rate
 
-        self.running = True
+        read_pointer = self.play_head.pointer
+        rim_ptr = read_pointer % len(rim_buffer)
 
-        self.thread = threading.Thread(target=self.run, daemon=True)
-        self.thread.start()
+        buf: np.ndarray = rim_buffer[rim_ptr:rim_ptr + frames_per_buffer]
+        out_data = buf.tobytes()
+        flag = pyaudio.paContinue
+        rim_buffer[rim_ptr:rim_ptr + frames_per_buffer] = 0
+        read_pointer += len(buf)
+        self.play_head = PlayHead(read_pointer, self.start_time + read_pointer / sample_rate)
+        return (out_data, flag)
 
     def run(self):
         self.start_time = start_time = time.time()
-        ring_buffer = self.ring_buffer
+        rim_buffer = self.rim_buffer
         frames_per_buffer = self.frames_per_buffer
         sample_rate = self.sample_rate
 
         # pre-load so there is always at least 1 buffer of extra data queued
         self.play_start_time = time.time()
-        pre_buffer = 512
+        pre_buffer = 1024 * 4
         self.out_stream.write(b'\0\0' * pre_buffer)
 
         while self.running:
             read_pointer = self.play_head.pointer
-            ring_ptr = read_pointer % len(ring_buffer)
+            rim_ptr = read_pointer % len(rim_buffer)
 
             # sleep until time to play the next chunk
             now = time.time()
@@ -105,15 +126,16 @@ class PlaybackStream:
             if dt > 0:
                 time.sleep(dt)
             
-            buf:np.ndarray = ring_buffer[ring_ptr:ring_ptr+frames_per_buffer]
+            buf:np.ndarray = rim_buffer[rim_ptr:rim_ptr+frames_per_buffer]
+            before = time.time()
             self.out_stream.write(buf.tobytes())
-            ring_buffer[ring_ptr:ring_ptr+frames_per_buffer] = 0
+            print(f"time to write {time.time() - before:0.05f}")
+            rim_buffer[rim_ptr:rim_ptr+frames_per_buffer] = 0
             read_pointer += len(buf)
             self.play_head = PlayHead(read_pointer, self.play_start_time + (read_pointer + pre_buffer) / sample_rate)
 
     def stop(self):
         self.running = False
-        self.thread.join()
         self.out_stream.stop_stream()
         self.out_stream.close()
 
@@ -121,16 +143,16 @@ class PlaybackStream:
         return int((time - self.start_time) * sample_rate)
 
     def add_buffer_data(self, data:np.ndarray, index:int):
-        """add data into ring buffer, possibly in two parts if it wraps around to the beginning
+        """add data into rim buffer, possibly in two parts if it wraps around to the beginning
         """
-        ring_buffer = self.ring_buffer
-        ring_ptr = index % len(ring_buffer)
+        rim_buffer = self.rim_buffer
+        rim_ptr = index % len(rim_buffer)
 
-        first_size = min(len(data), len(ring_buffer) - ring_ptr)
-        ring_buffer[ring_ptr:ring_ptr+first_size] += data[:first_size]
+        first_size = min(len(data), len(rim_buffer) - rim_ptr)
+        rim_buffer[rim_ptr:rim_ptr+first_size] += data[:first_size]
         if first_size < len(data):
             second_size = len(data) - first_size
-            ring_buffer[:second_size] = data[first_size:]
+            rim_buffer[:second_size] = data[first_size:]
 
 
 class StreamWriter:
@@ -173,12 +195,12 @@ class StreamWriter:
             desired_play_time = play_time + self.latency
             desired_play_index = last_play_index + int((desired_play_time - last_play_time) * sample_rate)
             desired_index_offset = desired_play_index - index
-            # print("Handle data")
-            # print("   data:", index, play_time)
-            # print("   play head:", last_play_index, last_play_time)
-            # print("   desired play:", desired_play_index, desired_play_time)
-            # print("   desired offset:", desired_index_offset)
-            # print("adjust index offset:", self.index_offset, desired_index_offset)
+            print("Handle data")
+            print("   data:", index, play_time)
+            print("   play head:", last_play_index, last_play_time)
+            print("   desired play:", desired_play_index, desired_play_time)
+            print("   desired offset:", desired_index_offset)
+            print("adjust index offset:", self.index_offset, desired_index_offset)
             self.index_offset = desired_index_offset
 
         write_pointer = index + self.index_offset
@@ -322,10 +344,10 @@ if __name__ == '__main__':
     pa = pyaudio.PyAudio()
 
     sample_rate = 22050
-    latency = 50e-3
+    latency = 500e-3
 
-    mic_stream = RecordingStream(sample_rate, frames_per_buffer=128)
-    out_stream = PlaybackStream(sample_rate, frames_per_buffer=128)
+    mic_stream = RecordingStream(sample_rate, frames_per_buffer=256)
+    out_stream = PlaybackStream(sample_rate, frames_per_buffer=256)
     mic_writer = StreamWriter(mic_stream, out_stream, latency=latency)
 
     udp_stream = UDPStream(args.address, args.listen)
