@@ -348,7 +348,7 @@ if __name__ == "__main__":
     pa = pyaudio.PyAudio()
 
     sample_rate = 22050
-    latency = 500e-3
+    latency = 200e-3
 
     mic_stream = RecordingStream(sample_rate, frames_per_buffer=256)
     out_stream = PlaybackStream(sample_rate, frames_per_buffer=256)
